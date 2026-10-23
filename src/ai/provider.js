@@ -40,14 +40,86 @@ export function createHttpProvider(config = {}) {
     return {
         name: 'http',
         async complete(request) {
-            // TODO (candidate): call the LLM API of your choice with fetch().
-            //   - send request.system as the system prompt, request.history then
-            //     request.user as the conversation turns
-            //   - return { text: <model text>, provider: 'http' }
-            //   - surface network / auth / rate-limit failures as thrown Errors
-            //     with a readable message; the UI must show them, never swallow them
-            void endpoint; void apiKey; void model; void request
-            throw new Error('createHttpProvider is not implemented yet — wire it to the API of your choice (src/ai/provider.js)')
+            if (!endpoint) {
+                throw new Error('HTTP provider endpoint is missing. Please set VITE_AI_ENDPOINT in .env.local')
+            }
+
+            // Build conversation turns
+            const messages = []
+            if (request.system) {
+                messages.push({ role: 'system', content: request.system })
+            }
+            if (Array.isArray(request.history)) {
+                for (const turn of request.history) {
+                    if (turn && turn.role && turn.content) {
+                        messages.push({ role: turn.role, content: turn.content })
+                    }
+                }
+            }
+            if (request.user) {
+                messages.push({ role: 'user', content: request.user })
+            }
+
+            const headers = {
+                'Content-Type': 'application/json',
+            }
+            if (apiKey) {
+                headers['Authorization'] = apiKey.startsWith('Bearer ') ? apiKey : `Bearer ${apiKey}`
+            }
+
+            let response
+            try {
+                response = await fetch(endpoint, {
+                    method: 'POST',
+                    headers,
+                    body: JSON.stringify({
+                        model: model || 'default',
+                        messages,
+                    }),
+                })
+            } catch (networkErr) {
+                throw new Error(`Network failure: ${networkErr.message || 'Unable to reach AI endpoint'}`)
+            }
+
+            if (!response.ok) {
+                let errorDetails = ''
+                try {
+                    const errorJson = await response.json()
+                    errorDetails = errorJson.error?.message || errorJson.message || JSON.stringify(errorJson)
+                } catch {
+                    errorDetails = response.statusText || 'Unknown error'
+                }
+
+                if (response.status === 401 || response.status === 403) {
+                    throw new Error(`Authentication error (${response.status}): ${errorDetails || 'Invalid API key or unauthorized'}`)
+                }
+                if (response.status === 429) {
+                    throw new Error(`Rate limit exceeded (${response.status}): ${errorDetails || 'Too many requests, please retry later'}`)
+                }
+                throw new Error(`Provider error (${response.status}): ${errorDetails}`)
+            }
+
+            const data = await response.json()
+            // Extract response text across common standard payload shapes (OpenAI, Anthropic, Ollama, etc.)
+            let text = ''
+            if (data.choices && data.choices[0]?.message?.content) {
+                text = data.choices[0].message.content
+            } else if (data.content && Array.isArray(data.content) && data.content[0]?.text) {
+                text = data.content[0].text
+            } else if (data.message?.content) {
+                text = data.message.content
+            } else if (data.response) {
+                text = data.response
+            } else if (typeof data === 'string') {
+                text = data
+            } else {
+                text = JSON.stringify(data)
+            }
+
+            return {
+                text,
+                provider: 'http',
+            }
         },
     }
 }
